@@ -1,0 +1,29 @@
+{
+  "name": "pixelobj",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "build": "rbxtsc",
+    "watch": "rbxtsc -w"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@rbxts/compiler-types": "^3.0.0-types.0",
+    "@rbxts/types": "^1.0.876",
+    "@typescript-eslint/eslint-plugin": "^8.39.1",
+    "@typescript-eslint/parser": "^8.39.1",
+    "eslint": "^9.33.0",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-prettier": "^5.5.4",
+    "eslint-plugin-roblox-ts": "^1.1.0",
+    "prettier": "^3.6.2",
+    "roblox-ts": "^3.0.0",
+    "typescript": "^5.8.3"
+  },
+  "dependencies": {
+    "@rbxts/services": "^1.5.5"
+  }
+}
