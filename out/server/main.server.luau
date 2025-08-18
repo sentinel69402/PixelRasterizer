@@ -13,6 +13,13 @@ local filterList = {}
 raycastParams.FilterType = Enum.RaycastFilterType.Exclude
 local skybox = true
 local skyboxColor = Color3.fromRGB(51, 168, 247)
+-- batch updates
+local MAX_PARTS = 100000
+local BYTES_PER_PART = 20
+local updateBuffer = buffer.create(MAX_PARTS * BYTES_PER_PART)
+local partIndexMap = {}
+local dirtyParts = {}
+local nextPartIndex = 0
 -- shadow constants
 local SHADOW_COLOR = Color3.fromRGB(50, 50, 100)
 local LIGHT_COLOR = Color3.fromRGB(255, 255, 200)
@@ -52,6 +59,97 @@ end
 local function getLightDirection()
 	local sunDirection = Lighting:GetSunDirection()
 	return sunDirection.Unit
+end
+local function getPartIndex(part)
+	local _part = part
+	local index = partIndexMap[_part]
+	if index == nil then
+		local _original = nextPartIndex
+		nextPartIndex += 1
+		index = _original
+		local _part_1 = part
+		local _index = index
+		partIndexMap[_part_1] = _index
+	end
+	return index
+end
+local function materialToNumber(material)
+	return material.Value or 0
+end
+local function numberToMaterial(value)
+	for _, material in pairs(Enum.Material:GetEnumItems()) do
+		if material.Value == value then
+			return material
+		end
+	end
+	return Enum.Material.SmoothPlastic
+end
+local function bufferPartUpdate(part, color, transparency, material)
+	local partIndex = getPartIndex(part)
+	local offset = partIndex * BYTES_PER_PART
+	local currentR = buffer.readf32(updateBuffer, offset)
+	local currentG = buffer.readf32(updateBuffer, offset + 4)
+	local currentB = buffer.readf32(updateBuffer, offset + 8)
+	local currentA = buffer.readf32(updateBuffer, offset + 12)
+	local currentMat = buffer.readi32(updateBuffer, offset + 16)
+	local materialNum = materialToNumber(material)
+	local needsUpdate = math.abs(currentR - color.R) > 0.01 or math.abs(currentG - color.G) > 0.01 or math.abs(currentB - color.B) > 0.01 or math.abs(currentA - transparency) > 0.001 or currentMat ~= materialNum
+	if needsUpdate then
+		buffer.writef32(updateBuffer, offset, color.R)
+		buffer.writef32(updateBuffer, offset + 4, color.G)
+		buffer.writef32(updateBuffer, offset + 8, color.B)
+		buffer.writef32(updateBuffer, offset + 12, transparency)
+		buffer.writei32(updateBuffer, offset + 16, materialNum)
+		dirtyParts[partIndex] = true
+	end
+end
+local function flushBufferedUpdates()
+	-- ▼ ReadonlySet.size ▼
+	local _size = 0
+	for _ in dirtyParts do
+		_size += 1
+	end
+	-- ▲ ReadonlySet.size ▲
+	if _size == 0 then
+		return nil
+	end
+	local startTime = tick()
+	local updatedCount = 0
+	for partIndex in dirtyParts do
+		local targetPart
+		for part, index in partIndexMap do
+			if index == partIndex then
+				targetPart = part
+				break
+			end
+		end
+		if targetPart then
+			local offset = partIndex * BYTES_PER_PART
+			local newR = buffer.readf32(updateBuffer, offset)
+			local newG = buffer.readf32(updateBuffer, offset + 4)
+			local newB = buffer.readf32(updateBuffer, offset + 8)
+			local newTransparency = buffer.readf32(updateBuffer, offset + 12)
+			local newMaterialNum = buffer.readi32(updateBuffer, offset + 16)
+			local newColor = Color3.new(newR, newG, newB)
+			local newMaterial = numberToMaterial(newMaterialNum)
+			if not fuzzyColorEq(targetPart.Color, newColor) then
+				targetPart.Color = newColor
+			end
+			if targetPart.Transparency ~= newTransparency then
+				targetPart.Transparency = newTransparency
+			end
+			if targetPart.Material ~= newMaterial then
+				targetPart.Material = newMaterial
+			end
+			updatedCount += 1
+		end
+	end
+	local updateTime = (tick() - startTime) * 1000
+	if updatedCount > 50 then
+		local timeStr = string.format("%.2f", updateTime)
+		print(`Buffered updated {updatedCount} parts in {timeStr}ms`)
+	end
+	table.clear(dirtyParts)
 end
 --[[
 	*
@@ -203,7 +301,7 @@ local function updatePart(data, currentFrame, lightDirection, maxShadowRays)
 	data.lastHitPosition = hitPosition
 	data.lastHitMaterial = hitMaterial
 	data.lastLightDirection = lightDirection
-	if sceneChanged or lightChanged or forceUpdate then
+	if sceneChanged or lightChanged then
 		if rayResult then
 			local hitPoint = rayResult.Position
 			local surfaceNormal = rayResult.Normal
@@ -217,46 +315,29 @@ local function updatePart(data, currentFrame, lightDirection, maxShadowRays)
 				local g = originalColor.G * (1 - blendAmount) + SHADOW_COLOR.G * blendAmount
 				local b = originalColor.B * (1 - blendAmount) + SHADOW_COLOR.B * blendAmount
 				local newColor = Color3.new(r, g, b)
-				if not fuzzyColorEq(part.Color, newColor) then
-					part.Color = newColor
-				end
-				if part.Transparency ~= SHADOW_TRANSPARENCY then
-					part.Transparency = SHADOW_TRANSPARENCY
-				end
-				if part.Material ~= rayResult.Instance.Material then
-					part.Material = rayResult.Instance.Material
-				end
+				bufferPartUpdate(part, newColor, SHADOW_TRANSPARENCY, rayResult.Instance.Material)
 			else
 				local originalColor = rayResult.Instance.Color
 				local r = math.min(1, originalColor.R * 0.3 + LIGHT_COLOR.R * 0.4)
 				local g = math.min(1, originalColor.G * 0.3 + LIGHT_COLOR.G * 0.4)
 				local b = math.min(1, originalColor.B * 0.3 + LIGHT_COLOR.B * 0.4)
 				local newColor = Color3.fromRGB(r * 255, g * 255, b * 255)
-				if not fuzzyColorEq(part.Color, newColor) then
-					part.Color = newColor
-				end
-				if part.Transparency ~= LIGHT_TRANSPARENCY then
-					part.Transparency = LIGHT_TRANSPARENCY
-				end
-				if part.Material ~= rayResult.Instance.Material then
-					part.Material = rayResult.Instance.Material
-				end
+				bufferPartUpdate(part, newColor, LIGHT_TRANSPARENCY, rayResult.Instance.Material)
 			end
 		else
 			if skybox then
-				part.Transparency = 0
-				part.Material = Enum.Material.SmoothPlastic
 				local r = skyboxColor.R * (1 - 0.6) + LIGHT_COLOR.R * 0.6
 				local g = skyboxColor.G * (1 - 0.6) + LIGHT_COLOR.G * 0.6
 				local b = skyboxColor.B * (1 - 0.6) + LIGHT_COLOR.B * 0.6
-				part.Color = Color3.fromRGB(r * 255, g * 255, b * 255)
+				local skyColor = Color3.fromRGB(r * 255, g * 255, b * 255)
+				bufferPartUpdate(part, skyColor, 0, Enum.Material.SmoothPlastic)
 			else
-				part.Transparency = 1
+				bufferPartUpdate(part, part.Color, 1, part.Material)
 			end
 		end
 	end
 end
-local _arg0 = rayModel(70, 30, CFrame.new(0, 0, 0))
+local _arg0 = rayModel(70, 64, CFrame.new(0, 0, 0))
 table.insert(allTrackedParts, _arg0)
 RunService.Heartbeat:Connect(function(dT)
 	refresh_timer += dT
@@ -267,6 +348,7 @@ RunService.Heartbeat:Connect(function(dT)
 	shadowLimiter = 0
 	globalFrameCount += 1
 	local lightDirection = getLightDirection()
+	local frameStartTime = tick()
 	local isForceUpdateFrame = globalFrameCount % FORCE_UPDATE_INT == 0
 	if isForceUpdateFrame then
 		local trackedParts = allTrackedParts[1]
@@ -295,5 +377,17 @@ RunService.Heartbeat:Connect(function(dT)
 			updatePart(data, globalFrameCount, lightDirection, shadowLimit)
 			index = (index + 1) % #trackedParts
 		end
+	end
+	flushBufferedUpdates()
+	local frameTime = (tick() - frameStartTime) * 1000
+	if frameTime > 10 then
+		local frameTimeStr = string.format("%.2f", frameTime)
+		-- ▼ ReadonlySet.size ▼
+		local _size = 0
+		for _ in dirtyParts do
+			_size += 1
+		end
+		-- ▲ ReadonlySet.size ▲
+		print(`Frame took {frameTimeStr}ms, updated {_size} parts`)
 	end
 end)

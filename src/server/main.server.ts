@@ -8,6 +8,13 @@ interface TrackedPart {
     lastLightDirection: Vector3 | undefined;
 }
 
+interface partUpdate {
+    part: BasePart,
+    color: Color3,
+    transparency: number,
+    material: Enum.Material,
+}
+
 // constants
 const batchSize = 200;
 const FORCE_UPDATE_INT = 10;
@@ -17,6 +24,13 @@ const filterList: Instance[] = [];
 raycastParams.FilterType = Enum.RaycastFilterType.Exclude;
 const skybox = true;
 const skyboxColor = Color3.fromRGB(51,168,247);
+// batch updates
+const MAX_PARTS = 100000;
+const BYTES_PER_PART = 20;
+const updateBuffer = buffer.create(MAX_PARTS * BYTES_PER_PART);
+const partIndexMap = new Map<BasePart,number>();
+const dirtyParts = new Set<number>();
+let nextPartIndex = 0;
 // shadow constants
 const SHADOW_COLOR = Color3.fromRGB(50,50,100);
 const LIGHT_COLOR = Color3.fromRGB(255,255,200);
@@ -54,6 +68,107 @@ function fuzzyColorEq(a: Color3, b: Color3, epsilon = 0.01) {
 function getLightDirection(): Vector3 {
     const sunDirection = Lighting.GetSunDirection();
     return sunDirection.Unit;
+}
+
+function getPartIndex(part: BasePart): number {
+    let index = partIndexMap.get(part);
+    if (index === undefined) {
+        index = nextPartIndex++;
+        partIndexMap.set(part,index);
+    }
+    return index;
+}
+
+function materialToNumber(material: Enum.Material): number {
+    return material.Value || 0;
+}
+
+function numberToMaterial(value: number): Enum.Material {
+    for (const [_, material] of pairs(Enum.Material.GetEnumItems())) {
+        if (material.Value === value) {
+            return material;
+        }
+    }
+    return Enum.Material.SmoothPlastic; 
+}
+
+function bufferPartUpdate(part: BasePart,color: Color3,transparency: number,material: Enum.Material) {
+    const partIndex = getPartIndex(part);
+    const offset = partIndex * BYTES_PER_PART;
+    
+    const currentR = buffer.readf32(updateBuffer, offset);
+    const currentG = buffer.readf32(updateBuffer, offset + 4);
+    const currentB = buffer.readf32(updateBuffer, offset + 8);
+    const currentA = buffer.readf32(updateBuffer, offset + 12);
+    const currentMat = buffer.readi32(updateBuffer, offset + 16);
+    
+    const materialNum = materialToNumber(material);
+    
+    const needsUpdate = math.abs(currentR - color.R) > 0.01 ||
+                       math.abs(currentG - color.G) > 0.01 ||
+                       math.abs(currentB - color.B) > 0.01 ||
+                       math.abs(currentA - transparency) > 0.001 ||
+                       currentMat !== materialNum;
+    
+    if (needsUpdate) {
+        buffer.writef32(updateBuffer, offset, color.R);
+        buffer.writef32(updateBuffer, offset + 4, color.G);
+        buffer.writef32(updateBuffer, offset + 8, color.B);
+        buffer.writef32(updateBuffer, offset + 12, transparency);
+        buffer.writei32(updateBuffer, offset + 16, materialNum);
+        
+        dirtyParts.add(partIndex);
+    }
+}
+
+function flushBufferedUpdates() {
+    if (dirtyParts.size() === 0) return;
+    
+    const startTime = tick();
+    let updatedCount = 0;
+    
+    for (const partIndex of dirtyParts) {
+        let targetPart: BasePart | undefined;
+        for (const [part, index] of partIndexMap) {
+            if (index === partIndex) {
+                targetPart = part;
+                break;
+            }
+        }
+        
+        if (targetPart) {
+            const offset = partIndex * BYTES_PER_PART;
+            
+            const newR = buffer.readf32(updateBuffer, offset);
+            const newG = buffer.readf32(updateBuffer, offset + 4);
+            const newB = buffer.readf32(updateBuffer, offset + 8);
+            const newTransparency = buffer.readf32(updateBuffer, offset + 12);
+            const newMaterialNum = buffer.readi32(updateBuffer, offset + 16);
+            
+            const newColor = new Color3(newR, newG, newB);
+            const newMaterial = numberToMaterial(newMaterialNum);
+            
+            if (!fuzzyColorEq(targetPart.Color, newColor)) {
+                targetPart.Color = newColor;
+            }
+            if (targetPart.Transparency !== newTransparency) {
+                targetPart.Transparency = newTransparency;
+            }
+            if (targetPart.Material !== newMaterial) {
+                targetPart.Material = newMaterial;
+            }
+            
+            updatedCount++;
+        }
+    }
+    
+    const updateTime = (tick() - startTime) * 1000;
+    if (updatedCount > 50) {
+        const timeStr = string.format("%.2f", updateTime);
+        print(`Buffered updated ${updatedCount} parts in ${timeStr}ms`);
+    }
+    
+    dirtyParts.clear();
 }
 
 /**
@@ -155,7 +270,7 @@ function updatePart(data: TrackedPart, currentFrame: number, lightDirection: Vec
     data.lastHitMaterial = hitMaterial;
     data.lastLightDirection = lightDirection;
     
-    if (sceneChanged || lightChanged || forceUpdate) {
+    if (sceneChanged || lightChanged) {
         if (rayResult) {
             const hitPoint = rayResult.Position;
             const surfaceNormal = rayResult.Normal;
@@ -171,9 +286,8 @@ function updatePart(data: TrackedPart, currentFrame: number, lightDirection: Vec
                 const g = originalColor.G * (1 - blendAmount) + SHADOW_COLOR.G * blendAmount;
                 const b = originalColor.B * (1 - blendAmount) + SHADOW_COLOR.B * blendAmount;
                 const newColor = new Color3(r, g, b);
-                if (!fuzzyColorEq(part.Color, newColor)) part.Color = newColor;
-                if (part.Transparency !== SHADOW_TRANSPARENCY) part.Transparency = SHADOW_TRANSPARENCY;
-                if (part.Material !== rayResult.Instance.Material) part.Material = rayResult.Instance.Material;
+                
+                bufferPartUpdate(part,newColor,SHADOW_TRANSPARENCY,rayResult.Instance.Material);
             } else {
                 const originalColor = rayResult.Instance.Color;
 
@@ -181,24 +295,23 @@ function updatePart(data: TrackedPart, currentFrame: number, lightDirection: Vec
                 const g = math.min(1, originalColor.G * 0.3 + LIGHT_COLOR.G * 0.4);
                 const b = math.min(1, originalColor.B * 0.3 + LIGHT_COLOR.B * 0.4);
                 const newColor = Color3.fromRGB(r * 255, g * 255, b * 255);
-                if (!fuzzyColorEq(part.Color, newColor)) part.Color = newColor;
-                if (part.Transparency !== LIGHT_TRANSPARENCY) part.Transparency = LIGHT_TRANSPARENCY;
-                if (part.Material !== rayResult.Instance.Material) part.Material = rayResult.Instance.Material;
+                
+                bufferPartUpdate(part,newColor,LIGHT_TRANSPARENCY,rayResult.Instance.Material);
             }
         } else {
             if (skybox) {
-                part.Transparency = 0;
-                part.Material = Enum.Material.SmoothPlastic;
                 const r = skyboxColor.R * (1 - 0.6) + LIGHT_COLOR.R * 0.6;
                 const g = skyboxColor.G * (1 - 0.6) + LIGHT_COLOR.G * 0.6;
                 const b = skyboxColor.B * (1 - 0.6) + LIGHT_COLOR.B * 0.6;
-                part.Color = Color3.fromRGB(r * 255,g * 255,b * 255);
-            } else {part.Transparency = 1;}
+                const skyColor = Color3.fromRGB(r * 255,g * 255,b * 255);
+
+                bufferPartUpdate(part,skyColor,0,Enum.Material.SmoothPlastic);
+            } else {bufferPartUpdate(part,part.Color,1,part.Material);}
         }
     }
 }
 
-allTrackedParts.push(rayModel(70, 30, new CFrame(0, 0, 0)));
+allTrackedParts.push(rayModel(70, 64, new CFrame(0, 0, 0)));
 
 RunService.Heartbeat.Connect((dT) => {
     refresh_timer += dT;
@@ -207,6 +320,8 @@ RunService.Heartbeat.Connect((dT) => {
     shadowLimiter = 0;
     globalFrameCount++;
     const lightDirection = getLightDirection();
+
+    const frameStartTime = tick();
 
     const isForceUpdateFrame = globalFrameCount % FORCE_UPDATE_INT === 0;
 
@@ -225,5 +340,13 @@ RunService.Heartbeat.Connect((dT) => {
             updatePart(data, globalFrameCount, lightDirection, shadowLimit);
             index = (index + 1) % trackedParts.size();
         }
+    }
+
+    flushBufferedUpdates();
+
+    const frameTime = (tick() - frameStartTime) * 1000;
+    if (frameTime > 10) {
+        const frameTimeStr = string.format("%.2f",frameTime);
+        print(`Frame took ${frameTimeStr}ms, updated ${dirtyParts.size()} parts`);
     }
 });
