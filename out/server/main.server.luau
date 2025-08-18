@@ -11,6 +11,8 @@ local allTrackedParts = {}
 local raycastParams = RaycastParams.new()
 local filterList = {}
 raycastParams.FilterType = Enum.RaycastFilterType.Exclude
+local skybox = true
+local skyboxColor = Color3.fromRGB(51, 168, 247)
 -- shadow constants
 local SHADOW_COLOR = Color3.fromRGB(50, 50, 100)
 local LIGHT_COLOR = Color3.fromRGB(255, 255, 200)
@@ -226,9 +228,9 @@ local function updatePart(data, currentFrame, lightDirection, maxShadowRays)
 				end
 			else
 				local originalColor = rayResult.Instance.Color
-				local r = math.min(1, originalColor.R * 0.7 + LIGHT_COLOR.R * 0.3)
-				local g = math.min(1, originalColor.G * 0.7 + LIGHT_COLOR.G * 0.3)
-				local b = math.min(1, originalColor.B * 0.7 + LIGHT_COLOR.B * 0.3)
+				local r = math.min(1, originalColor.R * 0.3 + LIGHT_COLOR.R * 0.4)
+				local g = math.min(1, originalColor.G * 0.3 + LIGHT_COLOR.G * 0.4)
+				local b = math.min(1, originalColor.B * 0.3 + LIGHT_COLOR.B * 0.4)
 				local newColor = Color3.fromRGB(r * 255, g * 255, b * 255)
 				if not fuzzyColorEq(part.Color, newColor) then
 					part.Color = newColor
@@ -241,7 +243,16 @@ local function updatePart(data, currentFrame, lightDirection, maxShadowRays)
 				end
 			end
 		else
-			part.Transparency = 1
+			if skybox then
+				part.Transparency = 0
+				part.Material = Enum.Material.SmoothPlastic
+				local r = skyboxColor.R * (1 - 0.6) + LIGHT_COLOR.R * 0.6
+				local g = skyboxColor.G * (1 - 0.6) + LIGHT_COLOR.G * 0.6
+				local b = skyboxColor.B * (1 - 0.6) + LIGHT_COLOR.B * 0.6
+				part.Color = Color3.fromRGB(r * 255, g * 255, b * 255)
+			else
+				part.Transparency = 1
+			end
 		end
 	end
 end

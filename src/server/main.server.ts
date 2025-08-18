@@ -15,7 +15,8 @@ const allTrackedParts: TrackedPart[][] = [];
 const raycastParams = new RaycastParams();
 const filterList: Instance[] = [];
 raycastParams.FilterType = Enum.RaycastFilterType.Exclude;
-
+const skybox = true;
+const skyboxColor = Color3.fromRGB(51,168,247);
 // shadow constants
 const SHADOW_COLOR = Color3.fromRGB(50,50,100);
 const LIGHT_COLOR = Color3.fromRGB(255,255,200);
@@ -176,16 +177,23 @@ function updatePart(data: TrackedPart, currentFrame: number, lightDirection: Vec
             } else {
                 const originalColor = rayResult.Instance.Color;
 
-                const r = math.min(1, originalColor.R * 0.7 + LIGHT_COLOR.R * 0.3);
-                const g = math.min(1, originalColor.G * 0.7 + LIGHT_COLOR.G * 0.3);
-                const b = math.min(1, originalColor.B * 0.7 + LIGHT_COLOR.B * 0.3);
+                const r = math.min(1, originalColor.R * 0.3 + LIGHT_COLOR.R * 0.4);
+                const g = math.min(1, originalColor.G * 0.3 + LIGHT_COLOR.G * 0.4);
+                const b = math.min(1, originalColor.B * 0.3 + LIGHT_COLOR.B * 0.4);
                 const newColor = Color3.fromRGB(r * 255, g * 255, b * 255);
                 if (!fuzzyColorEq(part.Color, newColor)) part.Color = newColor;
                 if (part.Transparency !== LIGHT_TRANSPARENCY) part.Transparency = LIGHT_TRANSPARENCY;
                 if (part.Material !== rayResult.Instance.Material) part.Material = rayResult.Instance.Material;
             }
         } else {
-            part.Transparency = 1;
+            if (skybox) {
+                part.Transparency = 0;
+                part.Material = Enum.Material.SmoothPlastic;
+                const r = skyboxColor.R * (1 - 0.6) + LIGHT_COLOR.R * 0.6;
+                const g = skyboxColor.G * (1 - 0.6) + LIGHT_COLOR.G * 0.6;
+                const b = skyboxColor.B * (1 - 0.6) + LIGHT_COLOR.B * 0.6;
+                part.Color = Color3.fromRGB(r * 255,g * 255,b * 255);
+            } else {part.Transparency = 1;}
         }
     }
 }
