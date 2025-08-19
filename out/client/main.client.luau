@@ -2,7 +2,6 @@
 local TS = require(game:GetService("ReplicatedStorage"):WaitForChild("rbxts_include"):WaitForChild("RuntimeLib"))
 local _services = TS.import(script, game:GetService("ReplicatedStorage"), "rbxts_include", "node_modules", "@rbxts", "services")
 local Lighting = _services.Lighting
-local Players = _services.Players
 local RunService = _services.RunService
 local Workspace = _services.Workspace
 --[[
@@ -17,11 +16,11 @@ local Workspace = _services.Workspace
 	 
 ]]
 -- Constants for image size and performance tuning
-local IMAGE_WIDTH = 100
+local IMAGE_WIDTH = 70
 local IMAGE_HEIGHT = 60
 local TOTAL_PIXELS = IMAGE_WIDTH * IMAGE_HEIGHT
 local FORCE_UPDATE_INT = 10
-local BATCH_SIZE = 400
+local BATCH_SIZE = 200
 -- Create EditableImage
 local AssetService = game:GetService("AssetService")
 local editableImage = AssetService:CreateEditableImage({
@@ -29,12 +28,24 @@ local editableImage = AssetService:CreateEditableImage({
 })
 -- Image Label to display the EditableImage
 local imageLabel = Instance.new("ImageLabel")
-imageLabel.Size = UDim2.new(0.5, 0, 0.5, 0)
+imageLabel.Size = UDim2.new(1, 0, 1, 0)
 imageLabel.ImageContent = Content.fromObject(editableImage)
--- ScreenGui to hold the Image Label
-local screenGui = Instance.new("ScreenGui")
-screenGui.Parent = Players.LocalPlayer:WaitForChild("PlayerGui")
-imageLabel.Parent = screenGui
+local ratioConstraint = Instance.new("UIAspectRatioConstraint")
+ratioConstraint.Parent = imageLabel
+ratioConstraint.AspectRatio = 1.65
+local rendererPart = Instance.new("Part")
+rendererPart.Name = "Renderer"
+rendererPart.Anchored = true
+local _cFrame = CFrame.new(Vector3.new(10, 3, 0))
+local _arg0 = CFrame.Angles(0, math.rad(180), 0)
+rendererPart.CFrame = _cFrame * _arg0
+rendererPart.Size = Vector3.new(10, 10, 2)
+rendererPart.Parent = Workspace
+-- SurfaceGUI to hold the Image Label
+local SurfaceGUI = Instance.new("SurfaceGui")
+SurfaceGUI.CanvasSize = Vector2.new(IMAGE_WIDTH, IMAGE_HEIGHT)
+SurfaceGUI.Parent = rendererPart
+imageLabel.Parent = SurfaceGUI
 -- Storage for pixel data and pixel color buffer
 local pixelData = {}
 local pixelBuffer = buffer.create(TOTAL_PIXELS * 4)
@@ -61,6 +72,8 @@ local pixelIndex = 0
 local globalFrameCount = 0
 local refresh_timer = 0
 local shadowLimiter = 0
+local didUpdateFrame = false
+local lastFrameLightDir = nil
 --[[
 	*
 	 * Initializes pixel data array with world positions and ray directions.
@@ -78,7 +91,7 @@ local function initializePixelData(centerPosition, scale)
 			local worldX = centerPosition.X - (x - IMAGE_WIDTH / 2) * scale
 			local worldY = centerPosition.Y - (y - IMAGE_HEIGHT / 2) * scale
 			local worldZ = centerPosition.Z
-			local _arg0 = {
+			local _arg0_1 = {
 				worldPosition = Vector3.new(worldX, worldY, worldZ),
 				rayDirection = Vector3.new(0, 0, 1),
 				lastHitInstance = nil,
@@ -86,12 +99,40 @@ local function initializePixelData(centerPosition, scale)
 				lastHitMaterial = nil,
 				lastLightDirection = nil,
 			}
-			table.insert(pixelData, _arg0)
+			table.insert(pixelData, _arg0_1)
 		end
 	end
+	local gridPart = Instance.new("Part")
+	gridPart.Name = "RayOriginPlane"
+	gridPart.Anchored = true
+	gridPart.CanCollide = false
+	gridPart.Transparency = 0.9
+	gridPart.Material = Enum.Material.SmoothPlastic
+	gridPart.Color = Color3.fromRGB(40, 40, 40)
+	gridPart.Size = Vector3.new(IMAGE_WIDTH * scale, IMAGE_HEIGHT * scale, 0.05)
+	local _cFrame_1 = CFrame.new(centerPosition)
+	local _cFrame_2 = CFrame.new(0, 0, -0.025)
+	gridPart.CFrame = _cFrame_1 * _cFrame_2
+	gridPart.Parent = Workspace
+end
+--[[
+	* 
+	 * @deprecated - isn't used
+	 *  @param {Vector3} a - 1st vector3
+	 *  @param {Vector3} b - 2nd vector3
+	 *  @param {number} [epsilon = 0.001] - optional param for tolerance threshold
+	 *  @returns {boolean} true/false
+	 
+]]
+local function fuzzyEqual(a, b, epsilon)
+	if epsilon == nil then
+		epsilon = 0.001
+	end
+	return math.abs(a.X - b.X) < epsilon and math.abs(a.Y - b.Y) < epsilon and math.abs(a.Z - b.Z) < epsilon
 end
 --[[
 	*
+	 * @deprecated - isn't used
 	 * Converts 2D pixel coordinates to a linear index in the pixel buffer.
 	 * Y coordinate is flipped to match image orientation.
 	 * @param {number} x - The x coordinate of the pixel.
@@ -152,8 +193,8 @@ local function isInShadow(position, lightDirection, maxDistance, maxShadowRays)
 	end
 	shadowLimiter += 1
 	local _position = position
-	local _arg0 = lightDirection.Unit * 0.1
-	local offsetPos = _position + _arg0
+	local _arg0_1 = lightDirection.Unit * 0.1
+	local offsetPos = _position + _arg0_1
 	local _lightDirection = lightDirection
 	local _maxDistance = maxDistance
 	local shadowRay = Workspace:Raycast(offsetPos, _lightDirection * _maxDistance, raycastParams)
@@ -170,13 +211,12 @@ end
 	 * @param {number} maxShadowRays - Maximum shadow raycasts allowed for this frame.
 	 
 ]]
-local function updatePixel(pixelIdx, currentFrame, lightDirection, maxShadowRays)
+local function updatePixel(pixelIdx, lightDirection, maxShadowRays)
 	local pixel = pixelData[pixelIdx + 1]
 	if not pixel then
 		return nil
 	end
-	local rayResult = Workspace:Raycast(pixel.worldPosition, pixel.rayDirection * 100)
-	local forceUpdate = currentFrame % FORCE_UPDATE_INT == 0
+	local rayResult = Workspace:Raycast(pixel.worldPosition, pixel.rayDirection * 150)
 	local _hitInstance = rayResult
 	if _hitInstance ~= nil then
 		_hitInstance = _hitInstance.Instance
@@ -197,17 +237,17 @@ local function updatePixel(pixelIdx, currentFrame, lightDirection, maxShadowRays
 	local hitMaterial = _hitMaterial
 	local sceneChanged = hitInstance ~= pixel.lastHitInstance or hitMaterial ~= pixel.lastHitMaterial
 	local lightChanged = not pixel.lastLightDirection or pixel.lastLightDirection.Unit:Dot(lightDirection.Unit) ~= 1
-	-- Update cached data
-	pixel.lastHitInstance = hitInstance
-	pixel.lastHitPosition = hitPosition
-	pixel.lastHitMaterial = hitMaterial
-	pixel.lastLightDirection = lightDirection
-	if sceneChanged or lightChanged or forceUpdate then
+	if sceneChanged or lightChanged then
+		pixel.lastHitInstance = hitInstance
+		pixel.lastHitPosition = hitPosition
+		pixel.lastHitMaterial = hitMaterial
+		pixel.lastLightDirection = lightDirection
+		didUpdateFrame = true
 		if rayResult then
 			local hitPoint = rayResult.Position
 			local surfaceNormal = rayResult.Normal
-			local _arg0 = surfaceNormal * 0.1
-			local testPosition = hitPoint + _arg0
+			local _arg0_1 = surfaceNormal * 0.1
+			local testPosition = hitPoint + _arg0_1
 			local inShadow = isInShadow(testPosition, lightDirection, 300, maxShadowRays)
 			if inShadow then
 				local originalColor = rayResult.Instance.Color
@@ -245,43 +285,25 @@ initializePixelData(Vector3.new(0, 15, -30), 0.5)
 -- Main loop
 RunService.Heartbeat:Connect(function(dT)
 	refresh_timer += dT
-	if refresh_timer < 1 / 20 then
+	if refresh_timer < 1 / 30 then
 		return nil
 	end
 	refresh_timer = 0
 	shadowLimiter = 0
 	globalFrameCount += 1
+	didUpdateFrame = false
 	local frameStartTime = tick()
 	local lightDirection = getLightDirection()
-	local isForceUpdateFrame = globalFrameCount % FORCE_UPDATE_INT == 0
-	if isForceUpdateFrame then
-		local maxForceUpdates = 500
-		local shadowLimit = 200
-		do
-			local i = 0
-			local _shouldIncrement = false
-			while true do
-				if _shouldIncrement then
-					i += 1
-				else
-					_shouldIncrement = true
-				end
-				if not (i < math.min(TOTAL_PIXELS, maxForceUpdates)) then
-					break
-				end
-				updatePixel(i, globalFrameCount, lightDirection, shadowLimit)
-			end
-		end
-	else
-		local shadowLimit = 400
-		for i = 0, BATCH_SIZE - 1 do
-			updatePixel(pixelIndex, globalFrameCount, lightDirection, shadowLimit)
-			pixelIndex = (pixelIndex + 1) % TOTAL_PIXELS
-		end
+	local shadowLimit = 400
+	for i = 0, BATCH_SIZE - 1 do
+		updatePixel(pixelIndex, lightDirection, shadowLimit)
+		pixelIndex = (pixelIndex + 1) % TOTAL_PIXELS
 	end
-	flushPixelUpdates()
+	if didUpdateFrame then
+		flushPixelUpdates()
+	end
 	local frameTime = (tick() - frameStartTime) * 1000
-	if frameTime > 5 then
+	if frameTime > 2 then
 		local frameTimeStr = string.format("%.2f", frameTime)
 		print(`Frame took {frameTimeStr}ms`)
 	end

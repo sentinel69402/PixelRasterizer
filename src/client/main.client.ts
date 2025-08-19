@@ -20,11 +20,11 @@ interface LightingPixel {
 }
 
 // Constants for image size and performance tuning
-const IMAGE_WIDTH = 100;
+const IMAGE_WIDTH = 70;
 const IMAGE_HEIGHT = 60;
 const TOTAL_PIXELS = IMAGE_WIDTH * IMAGE_HEIGHT;
 const FORCE_UPDATE_INT = 10; // Frames between forced updates
-const BATCH_SIZE = 400; // number of pixels updated per frame 
+const BATCH_SIZE = 200; // number of pixels updated per frame 
 
 // Create EditableImage
 const AssetService = game.GetService("AssetService");
@@ -34,13 +34,25 @@ const editableImage = AssetService.CreateEditableImage({
 
 // Image Label to display the EditableImage
 const imageLabel = new Instance("ImageLabel");
-imageLabel.Size = new UDim2(0.5, 0, 0.5, 0);
+imageLabel.Size = new UDim2(1, 0, 1, 0);
 imageLabel.ImageContent = Content.fromObject(editableImage);
 
-// ScreenGui to hold the Image Label
-const screenGui = new Instance("ScreenGui");
-screenGui.Parent = Players.LocalPlayer!.WaitForChild("PlayerGui");
-imageLabel.Parent = screenGui;
+const ratioConstraint = new Instance("UIAspectRatioConstraint");
+ratioConstraint.Parent = imageLabel;
+ratioConstraint.AspectRatio = 1.65;
+
+const rendererPart = new Instance("Part");
+rendererPart.Name = "Renderer";
+rendererPart.Anchored = true;
+rendererPart.CFrame = new CFrame(new Vector3(10,3,0)).mul(CFrame.Angles(0,math.rad(180),0));
+rendererPart.Size = new Vector3(10,10,2);
+rendererPart.Parent = Workspace;
+
+// SurfaceGUI to hold the Image Label
+const SurfaceGUI = new Instance("SurfaceGui");
+SurfaceGUI.CanvasSize = new Vector2(IMAGE_WIDTH,IMAGE_HEIGHT);
+SurfaceGUI.Parent = rendererPart;
+imageLabel.Parent = SurfaceGUI;
 
 // Storage for pixel data and pixel color buffer
 const pixelData: LightingPixel[] = [];
@@ -58,6 +70,8 @@ let pixelIndex = 0;
 let globalFrameCount = 0;
 let refresh_timer = 0;
 let shadowLimiter = 0;
+let didUpdateFrame = false;
+let lastFrameLightDir: Vector3 | undefined = undefined;
 
 /**
  * Initializes pixel data array with world positions and ray directions.
@@ -83,9 +97,34 @@ function initializePixelData(centerPosition: Vector3, scale: number = 1) {
             });
         }
     }
+    const gridPart = new Instance("Part");
+    gridPart.Name = "RayOriginPlane";
+    gridPart.Anchored = true;
+    gridPart.CanCollide = false;
+    gridPart.Transparency = 0.9;
+    gridPart.Material = Enum.Material.SmoothPlastic;
+    gridPart.Color = Color3.fromRGB(40, 40, 40);
+    gridPart.Size = new Vector3(IMAGE_WIDTH * scale, IMAGE_HEIGHT * scale, 0.05);
+
+    gridPart.CFrame = new CFrame(centerPosition).mul(new CFrame(0, 0, -0.025)); // Slight Z offset back
+    gridPart.Parent = Workspace;
+}
+
+/** 
+ * @deprecated - isn't used
+ *  @param {Vector3} a - 1st vector3
+ *  @param {Vector3} b - 2nd vector3
+ *  @param {number} [epsilon = 0.001] - optional param for tolerance threshold
+ *  @returns {boolean} true/false
+ */
+function fuzzyEqual(a: Vector3, b: Vector3, epsilon = 0.001) {
+    return math.abs(a.X - b.X) < epsilon
+        && math.abs(a.Y - b.Y) < epsilon
+        && math.abs(a.Z - b.Z) < epsilon;
 }
 
 /**
+ * @deprecated - isn't used
  * Converts 2D pixel coordinates to a linear index in the pixel buffer.
  * Y coordinate is flipped to match image orientation.
  * @param {number} x - The x coordinate of the pixel.
@@ -148,14 +187,12 @@ function isInShadow(position: Vector3, lightDirection: Vector3, maxDistance = 30
  * @param {Vector3} lightDirection - Current light direction.
  * @param {number} maxShadowRays - Maximum shadow raycasts allowed for this frame.
  */
-function updatePixel(pixelIdx: number, currentFrame: number, lightDirection: Vector3, maxShadowRays: number) {
+function updatePixel(pixelIdx: number, lightDirection: Vector3, maxShadowRays: number) {
     const pixel = pixelData[pixelIdx];
     if (!pixel) return;
     
-    const rayResult = Workspace.Raycast(pixel.worldPosition, pixel.rayDirection.mul(100));
-    
-    const forceUpdate = currentFrame % FORCE_UPDATE_INT === 0;
-    
+    const rayResult = Workspace.Raycast(pixel.worldPosition, pixel.rayDirection.mul(150));
+   
     const hitInstance = rayResult?.Instance;
     const hitPosition = rayResult?.Position;
     const hitMaterial = rayResult?.Instance?.Material;
@@ -165,14 +202,13 @@ function updatePixel(pixelIdx: number, currentFrame: number, lightDirection: Vec
     
     const lightChanged = !pixel.lastLightDirection || 
                          pixel.lastLightDirection.Unit.Dot(lightDirection.Unit) !== 1;
-    
-    // Update cached data
-    pixel.lastHitInstance = hitInstance;
-    pixel.lastHitPosition = hitPosition;
-    pixel.lastHitMaterial = hitMaterial;
-    pixel.lastLightDirection = lightDirection;
-    
-    if (sceneChanged || lightChanged || forceUpdate) {
+
+    if (sceneChanged || lightChanged) {
+        pixel.lastHitInstance = hitInstance;
+        pixel.lastHitPosition = hitPosition;
+        pixel.lastHitMaterial = hitMaterial;
+        pixel.lastLightDirection = lightDirection;
+        didUpdateFrame = true;
         if (rayResult) {
             const hitPoint = rayResult.Position;
             const surfaceNormal = rayResult.Normal;
@@ -226,36 +262,28 @@ initializePixelData(new Vector3(0, 15, -30), 0.5);
 // Main loop
 RunService.Heartbeat.Connect((dT) => {
     refresh_timer += dT;
-    if (refresh_timer < 1/20) return; // 60 FPS for smooth image updates
+    if (refresh_timer < 1/30) return; 
     refresh_timer = 0;
     shadowLimiter = 0;
     globalFrameCount++;
+    didUpdateFrame = false;
     
     const frameStartTime = tick();
     const lightDirection = getLightDirection();
-    
-    const isForceUpdateFrame = globalFrameCount % FORCE_UPDATE_INT === 0;
-    
-    if (isForceUpdateFrame) {
-        const maxForceUpdates = 500;
-        const shadowLimit = 200;
+
+    const shadowLimit = 400;
         
-        for (let i = 0; i < math.min(TOTAL_PIXELS, maxForceUpdates); i++) {
-            updatePixel(i, globalFrameCount, lightDirection, shadowLimit);
-        }
-    } else {
-        const shadowLimit = 400;
-        
-        for (let i = 0; i < BATCH_SIZE; i++) {
-            updatePixel(pixelIndex, globalFrameCount, lightDirection, shadowLimit);
-            pixelIndex = (pixelIndex + 1) % TOTAL_PIXELS;
-        }
+    for (let i = 0; i < BATCH_SIZE; i++) {
+        updatePixel(pixelIndex, lightDirection, shadowLimit);
+        pixelIndex = (pixelIndex + 1) % TOTAL_PIXELS;
     }
     
-    flushPixelUpdates();
+    if (didUpdateFrame) {
+        flushPixelUpdates();
+    }
     
     const frameTime = (tick() - frameStartTime) * 1000;
-    if (frameTime > 5) {
+    if (frameTime > 2) {
         const frameTimeStr = string.format("%.2f", frameTime);
         print(`Frame took ${frameTimeStr}ms`);
     }
